@@ -543,7 +543,7 @@ type_get_bases(PyTypeObject *type, void *context)
 }
 
 static PyTypeObject *best_base(PyObject *);
-static int mro_internal(PyTypeObject *);
+static int mro_internal(PyTypeObject *, PyObject **);
 static int compatible_for_assignment(PyTypeObject *, PyTypeObject *, char *);
 static int add_subclass(PyTypeObject*, PyTypeObject*);
 static int add_all_subclasses(PyTypeObject *type, PyObject *bases);
@@ -559,12 +559,37 @@ static int recurse_down_subclasses(PyTypeObject *type, PyObject *name,
 static PyObject *type_subclasses(PyTypeObject *type, PyObject *ignored);
 
 static int
-mro_subclasses(PyTypeObject *type, PyObject* temp)
+mro_hierarchy(PyTypeObject *type, PyObject *temp)
 {
     int res;
-    PyObject *old_mro;
+    PyObject *new_mro, *old_mro;
+    PyObject *tuple;
     PyObject *subclasses;
     Py_ssize_t i, n;
+
+    res = mro_internal(type, &old_mro);
+    if (res <= 0)
+        /* error / reentrance */
+        return res;
+    new_mro = type->tp_mro;
+
+    if (old_mro != NULL)
+        tuple = PyTuple_Pack(3, type, new_mro, old_mro);
+    else
+        tuple = PyTuple_Pack(2, type, new_mro);
+
+    if (tuple != NULL)
+        res = PyList_Append(temp, tuple);
+    else
+        res = -1;
+    Py_XDECREF(tuple);
+
+    if (res < 0) {
+        type->tp_mro = old_mro;
+        Py_DECREF(new_mro);
+        return -1;
+    }
+    Py_XDECREF(old_mro);
 
     /* Obtain a copy of subclasses list to iterate over.
 
@@ -583,25 +608,7 @@ mro_subclasses(PyTypeObject *type, PyObject* temp)
     for (i = 0; i < n; i++) {
         PyTypeObject *subclass;
         subclass = (PyTypeObject *)PyList_GET_ITEM(subclasses, i);
-        old_mro = subclass->tp_mro;
-        res = mro_internal(subclass);
-        if (res < 0) {
-            subclass->tp_mro = old_mro;
-            break;
-        }
-        else {
-            PyObject* tuple;
-            tuple = PyTuple_Pack(2, subclass, old_mro);
-            Py_DECREF(old_mro);
-            if (tuple != NULL)
-                res = PyList_Append(temp, tuple);
-            else
-                res = -1;
-            Py_XDECREF(tuple);
-            if (res < 0)
-                break;
-        }
-        res = mro_subclasses(subclass, temp);
+        res = mro_hierarchy(subclass, temp);
         if (res < 0)
             break;
     }
@@ -665,19 +672,14 @@ type_set_bases(PyTypeObject *type, PyObject *new_bases, void *context)
 
     old_bases = type->tp_bases;
     old_base = type->tp_base;
-    old_mro = type->tp_mro;
 
     type->tp_bases = new_bases;
     type->tp_base = new_base;
 
-    if (mro_internal(type) < 0) {
-        goto bail;
-    }
-
     temp = PyList_New(0);
     if (temp == NULL)
         goto bail;
-    if (mro_subclasses(type, temp) < 0)
+    if (mro_hierarchy(type, temp) < 0)
         goto undo;
     Py_DECREF(temp);
 
@@ -696,20 +698,22 @@ type_set_bases(PyTypeObject *type, PyObject *new_bases, void *context)
 
     Py_DECREF(old_bases);
     Py_DECREF(old_base);
-    Py_DECREF(old_mro);
 
     return res;
 
   undo:
     for (i = PyList_GET_SIZE(temp) - 1; i >= 0; i--) {
-        PyTypeObject* cls;
-        PyObject* mro;
+        PyTypeObject *cls;
+        PyObject *new_mro, *old_mro = NULL;
+
         PyArg_UnpackTuple(PyList_GET_ITEM(temp, i),
-                         "", 2, 2, &cls, &mro);
-        Py_INCREF(mro);
-        ob = cls->tp_mro;
-        cls->tp_mro = mro;
-        Py_DECREF(ob);
+                          "", 2, 3, &cls, &new_mro, &old_mro);
+        /* Do not rollback if cls has a newer version of MRO.  */
+        if (cls->tp_mro == new_mro) {
+            Py_XINCREF(old_mro);
+            cls->tp_mro = old_mro;
+            Py_DECREF(new_mro);
+        }
     }
     Py_DECREF(temp);
 
@@ -717,13 +721,9 @@ type_set_bases(PyTypeObject *type, PyObject *new_bases, void *context)
     {
         Py_DECREF(type->tp_bases);
         Py_DECREF(type->tp_base);
-        if (type->tp_mro != old_mro) {
-            Py_DECREF(type->tp_mro);
-        }
 
         type->tp_bases = old_bases;
         type->tp_base = old_base;
-        type->tp_mro = old_mro;
     }
 
     return -1;
@@ -1775,6 +1775,17 @@ mro_check(PyTypeObject *type, PyObject *mro)
 
 /* Lookups an mcls.mro method, invokes it and checks the result (if needed,
    in case of a custom mro() implementation).
+
+   Keep in mind that during execution of this function type->tp_mro
+   can be replaced due to possible reentrance (for example,
+   through type_set_bases):
+
+      - when looking up the mcls.mro attribute (it could be
+        a user-provided descriptor);
+
+      - from inside a custom mro() itself;
+
+      - through a finalizer of the return value of mro().
 */
 static PyObject *
 mro_invoke(PyTypeObject *type)
@@ -1810,15 +1821,49 @@ mro_invoke(PyTypeObject *type)
     return new_mro;
 }
 
-/* Calculates and assigns a new MRO to type->tp_mro. */
-static int
-mro_internal(PyTypeObject *type)
-{
-    PyObject *new_mro;
+/* Calculates and assigns a new MRO to type->tp_mro.
+   Return values and invariants:
 
-    new_mro = mro_invoke(type);
+     - Returns 1 if a new MRO value has been set to type->tp_mro due to
+       this call of mro_internal (no tricky reentrancy and no errors).
+
+       In case if p_old_mro argument is not NULL, a previous value
+       of type->tp_mro is put there, and the ownership of this
+       reference is transferred to a caller.
+       Otherwise, the previous value (if any) is decref'ed.
+
+     - Returns 0 in case when type->tp_mro gets changed because of
+       reentering here through a custom mro() (see a comment to mro_invoke).
+
+       In this case, a refcount of an old type->tp_mro is adjusted
+       somewhere deeper in the call stack (by the innermost mro_internal
+       or its caller) and may become zero upon returning from here.
+       This also implies that the whole hierarchy of subclasses of the type
+       has seen the new value and updated their MRO accordingly.
+
+     - Returns -1 in case of an error.
+*/
+static int
+mro_internal(PyTypeObject *type, PyObject **p_old_mro)
+{
+    PyObject *new_mro, *old_mro;
+    int reent;
+
+    /* Keep a reference to be able to do a reentrancy check below.
+       Don't let old_mro be GC'ed and its address be reused for
+       another object, like (suddenly!) a new tp_mro.  */
+    old_mro = type->tp_mro;
+    Py_XINCREF(old_mro);
+    new_mro = mro_invoke(type);  /* might cause reentrance */
+    reent = (type->tp_mro != old_mro);
+    Py_XDECREF(old_mro);
     if (new_mro == NULL)
         return -1;
+
+    if (reent) {
+        Py_DECREF(new_mro);
+        return 0;
+    }
 
     type->tp_mro = new_mro;
 
@@ -1829,7 +1874,12 @@ mro_internal(PyTypeObject *type)
 
     PyType_Modified(type);
 
-    return 0;
+    if (p_old_mro != NULL)
+        *p_old_mro = old_mro;  /* transfer the ownership */
+    else
+        Py_XDECREF(old_mro);
+
+    return 1;
 }
 
 
@@ -4701,9 +4751,8 @@ PyType_Ready(PyTypeObject *type)
     }
 
     /* Calculate method resolution order */
-    if (mro_internal(type) < 0) {
+    if (mro_internal(type, NULL) < 0)
         goto error;
-    }
 
     /* Inherit special flags from dominant base */
     if (type->tp_base != NULL)
