@@ -598,59 +598,63 @@ mro_subclasses(PyTypeObject *type, PyObject* temp)
 }
 
 static int
-type_set_bases(PyTypeObject *type, PyObject *value, void *context)
+type_set_bases(PyTypeObject *type, PyObject *new_bases, void *context)
 {
-    Py_ssize_t i;
-    int r = 0;
-    PyObject *ob, *temp;
+    int res = 0;
+    PyObject *temp;
+    PyObject *old_bases;
     PyTypeObject *new_base, *old_base;
-    PyObject *old_bases, *old_mro;
+    Py_ssize_t i;
 
-    if (!check_set_special_type_attr(type, value, "__bases__"))
+    if (!check_set_special_type_attr(type, new_bases, "__bases__"))
         return -1;
-    if (!PyTuple_Check(value)) {
+    if (!PyTuple_Check(new_bases)) {
         PyErr_Format(PyExc_TypeError,
              "can only assign tuple to %s.__bases__, not %s",
-                 type->tp_name, Py_TYPE(value)->tp_name);
+                 type->tp_name, Py_TYPE(new_bases)->tp_name);
         return -1;
     }
-    if (PyTuple_GET_SIZE(value) == 0) {
+    if (PyTuple_GET_SIZE(new_bases) == 0) {
         PyErr_Format(PyExc_TypeError,
              "can only assign non-empty tuple to %s.__bases__, not ()",
                  type->tp_name);
         return -1;
     }
-    for (i = 0; i < PyTuple_GET_SIZE(value); i++) {
-        ob = PyTuple_GET_ITEM(value, i);
+    for (i = 0; i < PyTuple_GET_SIZE(new_bases); i++) {
+        PyObject *ob;
+        PyTypeObject *base;
+
+        ob = PyTuple_GET_ITEM(new_bases, i);
         if (!PyType_Check(ob)) {
             PyErr_Format(PyExc_TypeError,
                          "%s.__bases__ must be tuple of classes, not '%s'",
                          type->tp_name, Py_TYPE(ob)->tp_name);
             return -1;
         }
-        if (PyType_IsSubtype((PyTypeObject*)ob, type)) {
+
+        base = (PyTypeObject*)ob;
+        if (PyType_IsSubtype(base, type)) {
             PyErr_SetString(PyExc_TypeError,
                             "a __bases__ item causes an inheritance cycle");
             return -1;
         }
     }
 
-    new_base = best_base(value);
-
-    if (!new_base)
+    new_base = best_base(new_bases);
+    if (new_base == NULL)
         return -1;
 
     if (!compatible_for_assignment(type->tp_base, new_base, "__bases__"))
         return -1;
 
+    Py_INCREF(new_bases);
     Py_INCREF(new_base);
-    Py_INCREF(value);
 
     old_bases = type->tp_bases;
     old_base = type->tp_base;
     old_mro = type->tp_mro;
 
-    type->tp_bases = value;
+    type->tp_bases = new_bases;
     type->tp_base = new_base;
 
     if (mro_internal(type) < 0) {
@@ -658,64 +662,65 @@ type_set_bases(PyTypeObject *type, PyObject *value, void *context)
     }
 
     temp = PyList_New(0);
-    if (!temp)
+    if (temp == NULL)
         goto bail;
-
-    r = mro_subclasses(type, temp);
-
-    if (r < 0) {
-        for (i = 0; i < PyList_Size(temp); i++) {
-            PyTypeObject* cls;
-            PyObject* mro;
-            PyArg_UnpackTuple(PyList_GET_ITEM(temp, i),
-                             "", 2, 2, &cls, &mro);
-            Py_INCREF(mro);
-            ob = cls->tp_mro;
-            cls->tp_mro = mro;
-            Py_DECREF(ob);
-        }
-        Py_DECREF(temp);
-        goto bail;
-    }
-
+    if (mro_subclasses(type, temp) < 0)
+        goto undo;
     Py_DECREF(temp);
 
-    /* any base that was in __bases__ but now isn't, we
-       need to remove |type| from its tp_subclasses.
-       conversely, any class now in __bases__ that wasn't
-       needs to have |type| added to its subclasses. */
+    {
+        /* any base that was in __bases__ but now isn't, we
+           need to remove |type| from its tp_subclasses.
+           conversely, any class now in __bases__ that wasn't
+           needs to have |type| added to its subclasses. */
 
-    /* for now, sod that: just remove from all old_bases,
-       add to all new_bases */
+        /* for now, sod that: just remove from all old_bases,
+           add to all new_bases */
 
-    remove_all_subclasses(type, old_bases);
+        remove_all_subclasses(type, old_bases);
 
-    for (i = PyTuple_GET_SIZE(value) - 1; i >= 0; i--) {
-        ob = PyTuple_GET_ITEM(value, i);
-        if (PyType_Check(ob)) {
-            if (add_subclass((PyTypeObject*)ob, type) < 0)
-                r = -1;
+        for (i = PyTuple_GET_SIZE(new_bases) - 1; i >= 0; i--) {
+            ob = PyTuple_GET_ITEM(new_bases, i);
+            if (PyType_Check(ob)) {
+                if (add_subclass((PyTypeObject*)ob, type) < 0)
+                    res = -1;
+            }
         }
-    }
 
-    update_all_slots(type);
+        update_all_slots(type);
+    }
 
     Py_DECREF(old_bases);
     Py_DECREF(old_base);
     Py_DECREF(old_mro);
 
-    return r;
+    return res;
+
+  undo:
+    for (i = PyList_GET_SIZE(temp) - 1; i >= 0; i--) {
+        PyTypeObject* cls;
+        PyObject* mro;
+        PyArg_UnpackTuple(PyList_GET_ITEM(temp, i),
+                         "", 2, 2, &cls, &mro);
+        Py_INCREF(mro);
+        ob = cls->tp_mro;
+        cls->tp_mro = mro;
+        Py_DECREF(ob);
+    }
+    Py_DECREF(temp);
 
   bail:
-    Py_DECREF(type->tp_bases);
-    Py_DECREF(type->tp_base);
-    if (type->tp_mro != old_mro) {
-        Py_DECREF(type->tp_mro);
-    }
+    {
+        Py_DECREF(type->tp_bases);
+        Py_DECREF(type->tp_base);
+        if (type->tp_mro != old_mro) {
+            Py_DECREF(type->tp_mro);
+        }
 
-    type->tp_bases = old_bases;
-    type->tp_base = old_base;
-    type->tp_mro = old_mro;
+        type->tp_bases = old_bases;
+        type->tp_base = old_base;
+        type->tp_mro = old_mro;
+    }
 
     return -1;
 }
