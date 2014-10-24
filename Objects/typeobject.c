@@ -546,6 +546,7 @@ static PyTypeObject *best_base(PyObject *);
 static int mro_internal(PyTypeObject *);
 static int compatible_for_assignment(PyTypeObject *, PyTypeObject *, char *);
 static int add_subclass(PyTypeObject*, PyTypeObject*);
+static int add_all_subclasses(PyTypeObject *type, PyObject *bases);
 static void remove_subclass(PyTypeObject *, PyTypeObject *);
 static void remove_all_subclasses(PyTypeObject *type, PyObject *bases);
 static void update_all_slots(PyTypeObject *);
@@ -676,17 +677,8 @@ type_set_bases(PyTypeObject *type, PyObject *new_bases, void *context)
 
         /* for now, sod that: just remove from all old_bases,
            add to all new_bases */
-
         remove_all_subclasses(type, old_bases);
-
-        for (i = PyTuple_GET_SIZE(new_bases) - 1; i >= 0; i--) {
-            ob = PyTuple_GET_ITEM(new_bases, i);
-            if (PyType_Check(ob)) {
-                if (add_subclass((PyTypeObject*)ob, type) < 0)
-                    res = -1;
-            }
-        }
-
+        res = add_all_subclasses(type, new_bases);
         update_all_slots(type);
     }
 
@@ -4832,6 +4824,24 @@ add_subclass(PyTypeObject *base, PyTypeObject *type)
     }
     Py_DECREF(key);
     return result;
+}
+
+static int
+add_all_subclasses(PyTypeObject *type, PyObject *bases)
+{
+    int res = 0;
+
+    if (bases) {
+        Py_ssize_t i;
+        for (i = 0; i < PyTuple_GET_SIZE(bases); i++) {
+            PyObject *base = PyTuple_GET_ITEM(bases, i);
+            if (PyType_Check(base))
+                if (add_subclass((PyTypeObject*)base, type) < 0)
+                    res = -1;
+        }
+    }
+
+    return res;
 }
 
 static void
