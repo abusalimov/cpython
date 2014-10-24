@@ -1730,59 +1730,88 @@ mro_external(PyObject *self)
 }
 
 static int
-mro_internal(PyTypeObject *type)
+mro_check(PyTypeObject *type, PyObject *mro)
 {
-    PyObject *mro, *result, *tuple;
-    int checkit = 0;
+    PyTypeObject *solid;
+    Py_ssize_t i, n;
 
-    if (Py_TYPE(type) == &PyType_Type) {
-        result = mro_implementation(type);
-    }
-    else {
-        _Py_IDENTIFIER(mro);
-        checkit = 1;
-        mro = lookup_method((PyObject *)type, &PyId_mro);
-        if (mro == NULL)
+    solid = solid_base(type);
+
+    n = PyTuple_GET_SIZE(mro);
+    for (i = 0; i < n; i++) {
+        PyTypeObject *base;
+        PyObject *tmp;
+
+        tmp = PyTuple_GET_ITEM(mro, i);
+        if (!PyType_Check(tmp)) {
+            PyErr_Format(
+                PyExc_TypeError,
+                "mro() returned a non-class ('%.500s')",
+                Py_TYPE(tmp)->tp_name);
             return -1;
-        result = PyObject_CallObject(mro, NULL);
-        Py_DECREF(mro);
-    }
-    if (result == NULL)
-        return -1;
-    tuple = PySequence_Tuple(result);
-    Py_DECREF(result);
-    if (tuple == NULL)
-        return -1;
-    if (checkit) {
-        Py_ssize_t i, len;
-        PyObject *cls;
-        PyTypeObject *solid;
+        }
 
-        solid = solid_base(type);
-
-        len = PyTuple_GET_SIZE(tuple);
-
-        for (i = 0; i < len; i++) {
-            PyTypeObject *t;
-            cls = PyTuple_GET_ITEM(tuple, i);
-            if (!PyType_Check(cls)) {
-                PyErr_Format(PyExc_TypeError,
-                 "mro() returned a non-class ('%.500s')",
-                                 Py_TYPE(cls)->tp_name);
-                Py_DECREF(tuple);
-                return -1;
-            }
-            t = (PyTypeObject*)cls;
-            if (!PyType_IsSubtype(solid, solid_base(t))) {
-                PyErr_Format(PyExc_TypeError,
-             "mro() returned base with unsuitable layout ('%.500s')",
-                                     t->tp_name);
-                        Py_DECREF(tuple);
-                        return -1;
-            }
+        base = (PyTypeObject*)tmp;
+        if (!PyType_IsSubtype(solid, solid_base(base))) {
+            PyErr_Format(
+                PyExc_TypeError,
+                "mro() returned base with unsuitable layout ('%.500s')",
+                base->tp_name);
+            return -1;
         }
     }
-    type->tp_mro = tuple;
+
+    return 0;
+}
+
+/* Lookups an mcls.mro method, invokes it and checks the result (if needed,
+   in case of a custom mro() implementation).
+*/
+static PyObject *
+mro_invoke(PyTypeObject *type)
+{
+    PyObject *mro_result;
+    PyObject *new_mro;
+    int custom = (Py_TYPE(type) != &PyType_Type);
+
+    if (custom) {
+        _Py_IDENTIFIER(mro);
+        PyObject *mro_meth = lookup_method((PyObject *)type, &PyId_mro);
+        if (mro_meth == NULL)
+            return NULL;
+        mro_result = PyObject_CallObject(mro_meth, NULL);
+        Py_DECREF(mro_meth);
+    }
+    else {
+        mro_result = mro_implementation(type);
+    }
+    if (mro_result == NULL)
+        return NULL;
+
+    new_mro = PySequence_Tuple(mro_result);
+    Py_DECREF(mro_result);
+    if (new_mro == NULL)
+        return NULL;
+
+    if (custom && mro_check(type, new_mro) < 0) {
+        Py_DECREF(new_mro);
+        return NULL;
+    }
+
+    return new_mro;
+}
+
+/* Calculates and assigns a new MRO to type->tp_mro. */
+static int
+mro_internal(PyTypeObject *type)
+{
+    PyObject *new_mro;
+
+    new_mro = mro_invoke(type);
+    if (new_mro == NULL)
+        return -1;
+
+    type->tp_mro = new_mro;
 
     type_mro_modified(type, type->tp_mro);
     /* corner case: the super class might have been hidden
