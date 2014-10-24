@@ -36,6 +36,60 @@ class MroTest(unittest.TestCase):
             self.step += 1
         return ret
 
+    def test_incomplete_set_bases_on_self(self):
+        """
+        type_set_bases must be aware that type->tp_mro can be NULL.
+        """
+        class M(DebugHelperMeta):
+            def mro(cls):
+                if self.step_until(1):
+                    assert cls.__mro__ is None
+                    cls.__bases__ += ()
+
+                return type.mro(cls)
+
+        class A(metaclass=M):
+            pass
+
+    def test_reent_set_bases_on_base(self):
+        """
+        Deep reentrancy must not over-decref old_mro.
+        """
+        class M(DebugHelperMeta):
+            def mro(cls):
+                if cls.__mro__ is not None and cls.__name__ == 'B':
+                    # 4-5 steps are usually enough to make it crash somewhere
+                    if self.step_until(10):
+                        A.__bases__ += ()
+
+                return type.mro(cls)
+
+        class A(metaclass=M):
+            pass
+        class B(A):
+            pass
+        B.__bases__ += ()
+
+    def test_reent_set_bases_on_direct_base(self):
+        """
+        Similar to test_reent_set_bases_on_base, but may crash differently.
+        """
+        class M(DebugHelperMeta):
+            def mro(cls):
+                base = cls.__bases__[0]
+                if base is not object:
+                    if self.step_until(5):
+                        base.__bases__ += ()
+
+                return type.mro(cls)
+
+        class A(metaclass=M):
+            pass
+        class B(A):
+            pass
+        class C(B):
+            pass
+
 
 if __name__ == '__main__':
     unittest.main()
