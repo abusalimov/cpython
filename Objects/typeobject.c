@@ -556,46 +556,58 @@ static int update_subclasses(PyTypeObject *type, PyObject *name,
                              update_callback callback, void *data);
 static int recurse_down_subclasses(PyTypeObject *type, PyObject *name,
                                    update_callback callback, void *data);
+static PyObject *type_subclasses(PyTypeObject *type, PyObject *ignored);
 
 static int
 mro_subclasses(PyTypeObject *type, PyObject* temp)
 {
-    PyTypeObject *subclass;
-    PyObject *ref, *subclasses, *old_mro;
-    Py_ssize_t i;
+    int res;
+    PyObject *old_mro;
+    PyObject *subclasses;
+    Py_ssize_t i, n;
 
-    subclasses = type->tp_subclasses;
+    /* Obtain a copy of subclasses list to iterate over.
+
+       Otherwise type->tp_subclasses might be altered
+       in the middle of the loop, for example, through a custom mro(),
+       by invoking type_set_bases on some subclass of the type
+       which in turn calls remove_subclass/add_subclass on this type.
+
+       Finally, this makes things simple avoiding the need to deal
+       with dictionary iterators and weak references.
+    */
+    subclasses = type_subclasses(type, NULL);
     if (subclasses == NULL)
-        return 0;
-    assert(PyDict_CheckExact(subclasses));
-    i = 0;
-
-    while (PyDict_Next(subclasses, &i, NULL, &ref)) {
-        assert(PyWeakref_CheckRef(ref));
-        subclass = (PyTypeObject *)PyWeakref_GET_OBJECT(ref);
-        assert(subclass != NULL);
-        if ((PyObject *)subclass == Py_None)
-            continue;
-        assert(PyType_Check(subclass));
+        return -1;
+    n = PyList_GET_SIZE(subclasses);
+    for (i = 0; i < n; i++) {
+        PyTypeObject *subclass;
+        subclass = (PyTypeObject *)PyList_GET_ITEM(subclasses, i);
         old_mro = subclass->tp_mro;
-        if (mro_internal(subclass) < 0) {
+        res = mro_internal(subclass);
+        if (res < 0) {
             subclass->tp_mro = old_mro;
-            return -1;
+            break;
         }
         else {
             PyObject* tuple;
             tuple = PyTuple_Pack(2, subclass, old_mro);
             Py_DECREF(old_mro);
-            if (!tuple)
-                return -1;
-            if (PyList_Append(temp, tuple) < 0)
-                return -1;
-            Py_DECREF(tuple);
+            if (tuple != NULL)
+                res = PyList_Append(temp, tuple);
+            else
+                res = -1;
+            Py_XDECREF(tuple);
+            if (res < 0)
+                break;
         }
-        if (mro_subclasses(subclass, temp) < 0)
-            return -1;
+        res = mro_subclasses(subclass, temp);
+        if (res < 0)
+            break;
     }
-    return 0;
+    Py_DECREF(subclasses);
+
+    return res;
 }
 
 static int
