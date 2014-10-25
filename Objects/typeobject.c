@@ -6906,70 +6906,74 @@ static PyObject *
 super_getattro(PyObject *self, PyObject *name)
 {
     superobject *su = (superobject *)self;
-    int skip = su->obj_type == NULL;
+    PyTypeObject *starttype;
+    PyObject *mro;
+    Py_ssize_t i, n;
 
-    if (!skip) {
-        /* We want __class__ to return the class of the super object
-           (i.e. super, or a subclass), not the class of su->obj. */
-        skip = (PyUnicode_Check(name) &&
-                PyUnicode_GET_LENGTH(name) == 9 &&
-                _PyUnicode_CompareWithId(name, &PyId___class__) == 0);
+    starttype = su->obj_type;
+    if (starttype == NULL)
+        goto skip;
+
+    /* We want __class__ to return the class of the super object
+       (i.e. super, or a subclass), not the class of su->obj. */
+    if (PyUnicode_Check(name) &&
+        PyUnicode_GET_LENGTH(name) == 9 &&
+        _PyUnicode_CompareWithId(name, &PyId___class__) == 0)
+        goto skip;
+
+    mro = starttype->tp_mro;
+    if (mro == NULL)
+        goto skip;
+
+    assert(PyTuple_Check(mro));
+    n = PyTuple_GET_SIZE(mro);
+
+    /* No need to check the last one: it's gonna be skipped anyway.  */
+    for (i = 0; i+1 < n; i++) {
+        if ((PyObject *)(su->type) == PyTuple_GET_ITEM(mro, i))
+            break;
     }
+    i++;  /* skip su->type (if any)  */
+    if (i >= n)
+        goto skip;
 
-    if (!skip) {
-        PyObject *mro, *res, *tmp, *dict;
-        PyTypeObject *starttype;
+    /* keep a strong reference to mro because starttype->tp_mro can be
+       replaced during PyDict_GetItem(dict, name)  */
+    Py_INCREF(mro);
+    do {
+        PyObject *res, *tmp, *dict;
         descrgetfunc f;
-        Py_ssize_t i, n;
 
-        starttype = su->obj_type;
-        mro = starttype->tp_mro;
+        tmp = PyTuple_GET_ITEM(mro, i);
+        assert(PyType_Check(tmp));
 
-        if (mro == NULL)
-            n = 0;
-        else {
-            assert(PyTuple_Check(mro));
-            n = PyTuple_GET_SIZE(mro);
-        }
-        for (i = 0; i < n; i++) {
-            if ((PyObject *)(su->type) == PyTuple_GET_ITEM(mro, i))
-                break;
-        }
-        i++;
-        res = NULL;
-        /* keep a strong reference to mro because starttype->tp_mro can be
-           replaced during PyDict_GetItem(dict, name)  */
-        Py_INCREF(mro);
-        for (; i < n; i++) {
-            tmp = PyTuple_GET_ITEM(mro, i);
-            if (PyType_Check(tmp))
-                dict = ((PyTypeObject *)tmp)->tp_dict;
-            else
-                continue;
-            res = PyDict_GetItem(dict, name);
-            if (res != NULL) {
-                Py_INCREF(res);
-                f = Py_TYPE(res)->tp_descr_get;
-                if (f != NULL) {
-                    tmp = f(res,
-                        /* Only pass 'obj' param if
-                           this is instance-mode super
-                           (See SF ID #743627)
-                        */
-                        (su->obj == (PyObject *)
-                                    su->obj_type
-                            ? (PyObject *)NULL
-                            : su->obj),
-                        (PyObject *)starttype);
-                    Py_DECREF(res);
-                    res = tmp;
-                }
-                Py_DECREF(mro);
-                return res;
+        dict = ((PyTypeObject *)tmp)->tp_dict;
+        assert(dict != NULL && PyDict_Check(dict));
+
+        res = PyDict_GetItem(dict, name);
+        if (res != NULL) {
+            Py_INCREF(res);
+
+            f = Py_TYPE(res)->tp_descr_get;
+            if (f != NULL) {
+                tmp = f(res,
+                    /* Only pass 'obj' param if this is instance-mode super
+                       (See SF ID #743627)  */
+                    (su->obj == (PyObject *)starttype) ? NULL : su->obj,
+                    (PyObject *)starttype);
+                Py_DECREF(res);
+                res = tmp;
             }
+
+            Py_DECREF(mro);
+            return res;
         }
-        Py_DECREF(mro);
-    }
+
+        i++;
+    } while (i < n);
+    Py_DECREF(mro);
+
+  skip:
     return PyObject_GenericGetAttr(self, name);
 }
 
