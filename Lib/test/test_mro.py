@@ -214,6 +214,22 @@ class MroTest(unittest.TestCase):
         class A(metaclass=M):
             pass
 
+    def test_incomplete_super(self):
+        """
+        Attrubute lookup on a super object must be aware that
+        its target type can be uninitialized (type->tp_mro == NULL).
+        """
+        class M(DebugHelperMeta):
+            def mro(cls):
+                if cls.__mro__ is None:
+                    with self.assertRaises(AttributeError):
+                        super(cls, cls).xxx
+
+                return type.mro(cls)
+
+        class A(metaclass=M):
+            pass
+
 
 if __name__ == '__main__':
     unittest.main()
