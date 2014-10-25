@@ -1616,10 +1616,11 @@ consistent method resolution\norder (MRO) for bases");
 }
 
 static int
-pmerge(PyObject *acc, PyObject* to_merge) {
+pmerge(PyObject *acc, PyObject* to_merge)
+{
+    int res = 0;
     Py_ssize_t i, j, to_merge_size, empty_cnt;
     int *remain;
-    int ok;
 
     to_merge_size = PyList_GET_SIZE(to_merge);
 
@@ -1657,15 +1658,13 @@ pmerge(PyObject *acc, PyObject* to_merge) {
         candidate = PyList_GET_ITEM(cur_list, remain[i]);
         for (j = 0; j < to_merge_size; j++) {
             PyObject *j_lst = PyList_GET_ITEM(to_merge, j);
-            if (tail_contains(j_lst, remain[j], candidate)) {
+            if (tail_contains(j_lst, remain[j], candidate))
                 goto skip; /* continue outer loop */
-            }
         }
-        ok = PyList_Append(acc, candidate);
-        if (ok < 0) {
-            PyMem_FREE(remain);
-            return -1;
-        }
+        res = PyList_Append(acc, candidate);
+        if (res < 0)
+            goto out;
+
         for (j = 0; j < to_merge_size; j++) {
             PyObject *j_lst = PyList_GET_ITEM(to_merge, j);
             if (remain[j] < PyList_GET_SIZE(j_lst) &&
@@ -1677,22 +1676,25 @@ pmerge(PyObject *acc, PyObject* to_merge) {
       skip: ;
     }
 
-    if (empty_cnt == to_merge_size) {
-        PyMem_FREE(remain);
-        return 0;
+    if (empty_cnt != to_merge_size) {
+        set_mro_error(to_merge, remain);
+        res = -1;
     }
-    set_mro_error(to_merge, remain);
+
+  out:
     PyMem_FREE(remain);
-    return -1;
+
+    return res;
 }
 
 static PyObject *
 mro_implementation(PyTypeObject *type)
 {
-    Py_ssize_t i, n;
-    int ok;
-    PyObject *bases, *result;
+    PyObject *result = NULL;
+    PyObject *bases;
     PyObject *to_merge, *bases_aslist;
+    int res;
+    Py_ssize_t i, n;
 
     if (type->tp_dict == NULL) {
         if (PyType_Ready(type) < 0)
@@ -1716,42 +1718,37 @@ mro_implementation(PyTypeObject *type)
         return NULL;
 
     for (i = 0; i < n; i++) {
-        PyObject *base = PyTuple_GET_ITEM(bases, i);
-        PyObject *parentMRO;
-        parentMRO = PySequence_List(((PyTypeObject*)base)->tp_mro);
-        if (parentMRO == NULL) {
-            Py_DECREF(to_merge);
-            return NULL;
-        }
+        PyTypeObject *base;
+        PyObject *base_mro_aslist;
 
-        PyList_SET_ITEM(to_merge, i, parentMRO);
+        base = (PyTypeObject *)PyTuple_GET_ITEM(bases, i);
+        base_mro_aslist = PySequence_List(base->tp_mro);
+        if (base_mro_aslist == NULL)
+            goto out;
+
+        PyList_SET_ITEM(to_merge, i, base_mro_aslist);
     }
 
     bases_aslist = PySequence_List(bases);
-    if (bases_aslist == NULL) {
-        Py_DECREF(to_merge);
-        return NULL;
-    }
+    if (bases_aslist == NULL)
+        goto out;
     /* This is just a basic sanity check. */
     if (check_duplicates(bases_aslist) < 0) {
-        Py_DECREF(to_merge);
         Py_DECREF(bases_aslist);
-        return NULL;
+        goto out;
     }
     PyList_SET_ITEM(to_merge, n, bases_aslist);
 
     result = Py_BuildValue("[O]", (PyObject *)type);
-    if (result == NULL) {
-        Py_DECREF(to_merge);
-        return NULL;
-    }
+    if (result == NULL)
+        goto out;
 
-    ok = pmerge(result, to_merge);
+    res = pmerge(result, to_merge);
+    if (res < 0)
+        Py_CLEAR(result);
+
+  out:
     Py_DECREF(to_merge);
-    if (ok < 0) {
-        Py_DECREF(result);
-        return NULL;
-    }
 
     return result;
 }
