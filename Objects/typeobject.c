@@ -1722,6 +1722,13 @@ mro_implementation(PyTypeObject *type)
         PyObject *base_mro_aslist;
 
         base = (PyTypeObject *)PyTuple_GET_ITEM(bases, i);
+        if (base->tp_mro == NULL) {
+            PyErr_Format(PyExc_TypeError,
+                         "Cannot extend an incomplete type '%.100s'",
+                         base->tp_name);
+            goto out;
+        }
+
         base_mro_aslist = PySequence_List(base->tp_mro);
         if (base_mro_aslist == NULL)
             goto out;
