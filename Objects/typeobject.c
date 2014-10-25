@@ -544,6 +544,7 @@ type_get_bases(PyTypeObject *type, void *context)
 
 static PyTypeObject *best_base(PyObject *);
 static int mro_internal(PyTypeObject *, PyObject **);
+static int type_is_subtype_base_chain(PyTypeObject *, PyTypeObject *);
 static int compatible_for_assignment(PyTypeObject *, PyTypeObject *, char *);
 static int add_subclass(PyTypeObject*, PyTypeObject*);
 static int add_all_subclasses(PyTypeObject *type, PyObject *bases);
@@ -653,7 +654,18 @@ type_set_bases(PyTypeObject *type, PyObject *new_bases, void *context)
         }
 
         base = (PyTypeObject*)ob;
-        if (PyType_IsSubtype(base, type)) {
+        if (PyType_IsSubtype(base, type) ||
+            /* In case of reentering here again through a custom mro()
+               the above check is not enough since it relies on
+               base->tp_mro which would gonna be updated inside
+               mro_internal only upon returning from the mro().
+
+               However, base->tp_base has already been assigned (see
+               below), which in turn may cause an inheritance cycle
+               through tp_base chain.  And this is definitely
+               not what you want to ever happen.  */
+            (base->tp_mro != NULL && type_is_subtype_base_chain(base, type))) {
+
             PyErr_SetString(PyExc_TypeError,
                             "a __bases__ item causes an inheritance cycle");
             return -1;
@@ -683,7 +695,9 @@ type_set_bases(PyTypeObject *type, PyObject *new_bases, void *context)
         goto undo;
     Py_DECREF(temp);
 
-    {
+    /* Take no action in case if type->tp_bases has been replaced
+       through reentrance.  */
+    if (type->tp_bases == new_bases) {
         /* any base that was in __bases__ but now isn't, we
            need to remove |type| from its tp_subclasses.
            conversely, any class now in __bases__ that wasn't
@@ -718,12 +732,18 @@ type_set_bases(PyTypeObject *type, PyObject *new_bases, void *context)
     Py_DECREF(temp);
 
   bail:
-    {
-        Py_DECREF(type->tp_bases);
-        Py_DECREF(type->tp_base);
+    if (type->tp_bases == new_bases) {
+        assert(type->tp_base == new_base);
 
         type->tp_bases = old_bases;
         type->tp_base = old_base;
+
+        Py_DECREF(new_bases);
+        Py_DECREF(new_base);
+    }
+    else {
+        Py_DECREF(old_bases);
+        Py_DECREF(old_base);
     }
 
     return -1;
