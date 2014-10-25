@@ -196,6 +196,24 @@ class MroTest(unittest.TestCase):
         self.assertEqual(C.__bases__, (B2,))
         self.assertEqual(C.__mro__, tuple(type.mro(C)))
 
+    def test_incomplete_extend(self):
+        """
+        Extending an unitialized type with type->tp_mro == NULL must
+        throw a reasonable TypeError exception, instead of failing
+        with PyErr_BadInternalCall.
+        """
+        class M(DebugHelperMeta):
+            def mro(cls):
+                if cls.__mro__ is None and cls.__name__ != 'X':
+                    with self.assertRaises(TypeError):
+                        class X(cls):
+                            pass
+
+                return type.mro(cls)
+
+        class A(metaclass=M):
+            pass
+
 
 if __name__ == '__main__':
     unittest.main()
