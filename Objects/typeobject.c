@@ -1297,6 +1297,18 @@ static PyTypeObject *solid_base(PyTypeObject *type);
 
 /* type test with subclassing support */
 
+Py_LOCAL_INLINE(int)
+type_is_subtype_base_chain(PyTypeObject *a, PyTypeObject *b)
+{
+    do {
+        if (a == b)
+            return 1;
+        a = a->tp_base;
+    } while (a != NULL);
+
+    return (b == &PyBaseObject_Type);
+}
+
 int
 PyType_IsSubtype(PyTypeObject *a, PyTypeObject *b)
 {
@@ -1315,15 +1327,9 @@ PyType_IsSubtype(PyTypeObject *a, PyTypeObject *b)
         }
         return 0;
     }
-    else {
+    else
         /* a is not completely initilized yet; follow tp_base */
-        do {
-            if (a == b)
-                return 1;
-            a = a->tp_base;
-        } while (a != NULL);
-        return b == &PyBaseObject_Type;
-    }
+        return type_is_subtype_base_chain(a, b);
 }
 
 /* Internal routines to do a method lookup in the type
