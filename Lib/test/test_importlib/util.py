@@ -53,11 +53,28 @@ def import_importlib(module_name):
     return {'Frozen': frozen, 'Source': source}
 
 
+class _ImportTests(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        if hasattr(cls, '__import__'):
+            test_module = sys.modules[cls.__module__]
+            if not hasattr(test_module, '__import__'):
+                test_module.__import__ = cls.__import__
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, '__import__'):
+            test_module = sys.modules[cls.__module__]
+            if getattr(test_module, '__import__', None) is cls.__import__:
+                del test_module.__import__
+
+
 def specialize_class(cls, kind, base=None, **kwargs):
     # XXX Support passing in submodule names--load (and cache) them?
     # That would clean up the test modules a bit more.
     if base is None:
-        base = unittest.TestCase
+        base = _ImportTests
     elif not isinstance(base, type):
         base = base[kind]
     name = '{}_{}'.format(kind, cls.__name__)
@@ -218,8 +235,36 @@ class _ImporterMock:
             if import_name != name:
                 module.__path__ = ['<mock __path__>']
             self.modules[import_name] = module
-            if import_name in module_code:
-                self.module_code[import_name] = module_code[import_name]
+
+            for func_name in (alias for n in (name, import_name)
+                              for alias in (n, n.replace('.', '_'))):
+                # Try, in order:
+                #     pkg.subpkg.__init__
+                #     pkg_subpkg___init__
+                #     pkg.subpkg
+                #     pkg_subpkg
+                if func_name in module_code:
+                    func = module_code[func_name]
+                    break
+            else:
+                continue  # the outer loop
+            # Sanity check for case we were called with module_code=locals(),
+            # which could contain unexpected values.
+            if not isinstance(func, types.FunctionType):
+                raise TypeError("Expected a function in module_code[{!r}], "
+                                "got a '{}' object instead: {!r}"
+                                .format(func_name, type(func), func))
+            if hasattr(func, '__wrapped__'):
+                raise NotImplementedError('Decorated function')
+            new_func = type(func)(func.__code__,
+                                  module.__dict__,  # <- the new __globals__
+                                  func.__name__,
+                                  func.__defaults__, func.__closure__)
+            for k, v in func.__globals__.items():
+                module.__dict__.setdefault(k, v)
+            for k, v in func.__dict__.items():
+                new_func.__dict__.setdefault(k, v)
+            self.module_code[import_name] = new_func
 
     def __getitem__(self, name):
         return self.modules[name]

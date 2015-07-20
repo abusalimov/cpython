@@ -323,7 +323,8 @@ class _installed_safely:
             spec = self._spec
             if any(arg is not None for arg in args):
                 try:
-                    del sys.modules[spec.name]
+                    if sys.modules[spec.name] is self._module:
+                        del sys.modules[spec.name]
                 except KeyError:
                     pass
             else:
@@ -1073,6 +1074,46 @@ def __import__(name, globals=None, locals=None, fromlist=(), level=0):
             return sys.modules[module.__name__[:len(module.__name__)-cut_off]]
     else:
         return _handle_fromlist(module, fromlist, _gcd_import)
+
+def __import__(name, globals=None, locals=None, fromlist=(), level=0):
+    """Import a module.
+
+    The 'globals' argument is used to infer where the import is occuring from
+    to handle relative imports. The 'locals' argument is ignored. The
+    'fromlist' argument specifies what should exist as attributes on the module
+    being imported (e.g. ``from module import <fromlist>``).  The 'level'
+    argument represents the package location to import from in a relative
+    import (e.g. ``from ..pkg import mod`` would have a 'level' of 2).
+
+    """
+    if level > 0:
+        if globals is None:
+            globals = {}
+        package = _calc___package__(globals)
+    else:
+        package = None
+
+    module = _gcd_import(name, package, level)
+
+    if fromlist:
+        return _handle_fromlist(module, fromlist, _gcd_import)
+    else:
+        # Return up to the first dot in 'name'.
+        # This is a bit complicated by the fact that 'name' may be relative.
+        if '.' in name:
+            # Keep in mind that 'module.__name__' does not necessarily equal to
+            # 'name', even considering its canonical representation, which you
+            # get after resolving relative imports. To give an idea:
+            #     sys.modules['os.path'].__name__ != 'os.path'  # 'posixpath'
+            #
+            # That is, avoid the temptation to reuse 'module.__name__'. Sigh...
+            return _gcd_import(name.partition('.')[0], package, level)
+            # root = name.partition('.')[0]
+            # if level > 0:
+            #     root = _resolve_name(root, package, level)
+            # return sys.modules[root]
+        # else:
+        return module
 
 
 def _builtin_from_name(name):
